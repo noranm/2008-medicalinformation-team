@@ -1,0 +1,558 @@
+---
+title: "Survival Analysis And Visualization"
+author: "노혜림"
+date: '2020 9 5 '
+output: 
+  html_document:
+    highlight: textmate
+    theme: cosmo
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    fig_height: 7
+    fig_width: 7
+  pdf_document:
+    toc: no
+  word_document:
+    fig_height: 7
+    fig_width: 9
+    toc: no
+---
+
+# Survival Analysis And Visualization
+
+## 요약
+### (1) 전처리
+
+ - 결측 값 BMI 2, TOT_CHOLE 2, SMK_STAT_TYPE_RSPS_CD 365, DRNK_HABIT_RSPS_CD 105, EXERCI_FREQ_RSPS_CD 111개가 있으며, 2002~2006년의 검진 자료를 이용해 결측 값 대체하였다. 
+ - 이 전 건강검진 기록이 존재하지 않는 SMK_STAT_TYPE_RSPS_CD 6개, DRNK_HABIT_RSPS_CD 1개는 분석에서 제외되어, 6632 row 사용 **(time-depedent 셋 기준 6638->6632)**
+ - 아래 기초통계량은 사람 기준으로 출력 (결측 4개 제외되어, 5636->5632)
+ - 우선) BMI (30 이상 1, 미만 0), AGE (65 이상 1, 미만 0), TOT_CHOLE (220 이상 1, 미만 0), DRNK_HABIT_RSPS_CD (4 이상 1, 미만 0), EXERCI_FREQ_RSPS_CD (4 이상 1, 미만 0)
+ 
+### (2) 결과 요약
+
+ - 맨 뒤에 그래프 및 표 확인
+ 
+ NO. | Method | Correction | HR | 95% Lower | 95% Upper | p-value 
+ ----|--------|------------|----|-----------|-----------|----------
+ 1 | Time-fixed Cox | X | 1.771 | 1.389 | 2.257 | ***
+ 2 | Time-Varying Cox	| X	| 3.981 | 3.076 | 5.152 | ***
+ 3 | Time-Varying Cox	| AGE, SEX, Income | 3.25 | 2.499 | 4.226 | ***
+ 4 | Time-Varying Cox	| AGE, SEX, Income, GJ | 3.07 | 2.356 | 4 | ***
+ 5 | Time-Varying Cox	| CCI	| 3.03 | 2.329 | 3.492 | ***
+ 6 | Time-Varying Cox	| CCI, AGE, SEX, Income	| 2.677 | 2.052 | 3.492 | ***
+ 7 | Time-Varying Cox	| CCI, AGE, SEX, Income, GJ	| 2.563 | 1.961 | 3.35 | ***
+ 8 | Time-Varying Cox	| All (+HTN, DM, DL) | 2.298 | 1.749 | 3.02 | ***
+ 
+## 0. Preparation 
+
+### Load Library
+```{r, warning=F, message=F, echo=F}
+library(knitr)
+
+library(readxl)
+library(dplyr)
+library(survival)
+library(survminer)
+library(moonBook)
+library(colorspace)
+
+```
+
+### Load Data
+```{r, warning=F, message=F, echo=F}
+data.fixed <- data.frame(read_excel("./data/surv_time_fixed.xlsx")) # time : % year 
+data.dependent <- data.frame(read_excel("./data/surv_time_dependent3.xlsx")) # start, stop : % day 
+
+gj1 <- data.frame(read_excel("./data/gj1.xlsx"))
+gj1_history <- gj1 %>% filter(HCHK_YEAR < 2007) %>% 
+  select(HCHK_YEAR, PERSON_ID, BMI, TOT_CHOLE, SMK_STAT_TYPE_RSPS_CD, DRNK_HABIT_RSPS_CD, EXERCI_FREQ_RSPS_CD) %>%
+  arrange(PERSON_ID)
+
+```
+
+### 결측 대체
+
+```{r, warning=F, message=F, echo=F}
+colSums(is.na(data.dependent))
+
+# (1) BMI
+NA_BMI_ID <- data.dependent[is.na(data.dependent$BMI), "PERSON_ID"]
+
+im_value <- gj1_history[(gj1_history$PERSON_ID %in% NA_BMI_ID), ] %>% 
+  filter(!is.na(BMI)) %>%
+  select(PERSON_ID, HCHK_YEAR, BMI) %>% 
+  group_by(PERSON_ID) %>%
+  mutate(RecentYear = max(HCHK_YEAR)) %>%
+  filter(RecentYear == HCHK_YEAR)
+
+if (!(length(NA_BMI_ID) == nrow(im_value))) cat("size match X")
+
+data.dependent[data.dependent$PERSON_ID %in% NA_BMI_ID, "BMI"] <- im_value$BMI
+
+# (2) TOT_CHOLE
+NA_CHOLE_ID <- data.dependent[is.na(data.dependent$TOT_CHOLE), "PERSON_ID"]
+
+im_value <- gj1_history[(gj1_history$PERSON_ID %in% NA_CHOLE_ID), ] %>% 
+  filter(!is.na(TOT_CHOLE)) %>%
+  select(PERSON_ID, HCHK_YEAR, TOT_CHOLE) %>% 
+  group_by(PERSON_ID) %>%
+  mutate(RecentYear = max(HCHK_YEAR)) %>%
+  filter(RecentYear == HCHK_YEAR)
+
+if (!(length(NA_CHOLE_ID) == nrow(im_value))) cat("size match X")
+
+data.dependent[data.dependent$PERSON_ID %in% NA_CHOLE_ID, "TOT_CHOLE"] <- im_value$TOT_CHOLE
+
+# (3) SMK_STAT_TYPE_RSPS_CD
+NA_SMK_ID <- data.dependent[is.na(data.dependent$SMK_STAT_TYPE_RSPS_CD), "PERSON_ID"]
+
+im_value <- gj1_history[(gj1_history$PERSON_ID %in% NA_SMK_ID), ] %>% 
+  filter(!is.na(SMK_STAT_TYPE_RSPS_CD)) %>%
+  select(PERSON_ID, HCHK_YEAR, SMK_STAT_TYPE_RSPS_CD) %>% 
+  group_by(PERSON_ID) %>%
+  mutate(RecentYear = max(HCHK_YEAR)) %>%
+  filter(RecentYear == HCHK_YEAR)
+
+if (!(length(NA_CHOLE_ID) == nrow(im_value))) cat("size match X")
+
+# size match X
+im_value2 <- merge(data.dependent[data.dependent$PERSON_ID %in% im_value$PERSON_ID, c("PERSON_ID", "SMK_STAT_TYPE_RSPS_CD")], 
+                   im_value[,c("PERSON_ID", "SMK_STAT_TYPE_RSPS_CD")], by = 'PERSON_ID', all.x=TRUE )
+
+data.dependent[data.dependent$PERSON_ID %in% im_value2$PERSON_ID, "SMK_STAT_TYPE_RSPS_CD"] <- im_value2$SMK_STAT_TYPE_RSPS_CD.y
+
+# (4) DRNK_HABIT_RSPS_CD
+NA_DRNK_ID <- data.dependent[is.na(data.dependent$DRNK_HABIT_RSPS_CD), "PERSON_ID"]
+
+im_value <- gj1_history[(gj1_history$PERSON_ID %in% NA_DRNK_ID), ] %>% 
+  filter(!is.na(DRNK_HABIT_RSPS_CD)) %>%
+  select(PERSON_ID, HCHK_YEAR, DRNK_HABIT_RSPS_CD) %>% 
+  group_by(PERSON_ID) %>%
+  mutate(RecentYear = max(HCHK_YEAR)) %>%
+  filter(RecentYear == HCHK_YEAR)
+
+if (!(length(NA_DRNK_ID) == nrow(im_value))) cat("size match X")
+
+# size match X
+im_value2 <- merge(data.dependent[data.dependent$PERSON_ID %in% im_value$PERSON_ID, c("PERSON_ID", "DRNK_HABIT_RSPS_CD")], 
+                   im_value[,c("PERSON_ID", "DRNK_HABIT_RSPS_CD")], by = 'PERSON_ID', all.x=TRUE )
+
+data.dependent[data.dependent$PERSON_ID %in% im_value2$PERSON_ID, "DRNK_HABIT_RSPS_CD"] <- im_value2$DRNK_HABIT_RSPS_CD.y
+
+# (5) EXERCI_FREQ_RSPS_CD
+NA_EXERCI_ID <- data.dependent[is.na(data.dependent$EXERCI_FREQ_RSPS_CD), "PERSON_ID"]
+
+im_value <- gj1_history[(gj1_history$PERSON_ID %in% NA_EXERCI_ID), ] %>% 
+  filter(!is.na(EXERCI_FREQ_RSPS_CD)) %>%
+  select(PERSON_ID, HCHK_YEAR, EXERCI_FREQ_RSPS_CD) %>% 
+  group_by(PERSON_ID) %>%
+  mutate(RecentYear = max(HCHK_YEAR)) %>%
+  filter(RecentYear == HCHK_YEAR)
+
+if (!(length(NA_EXERCI_ID) == nrow(im_value))) cat("size match X")
+
+# size match X
+im_value2 <- merge(data.dependent[data.dependent$PERSON_ID %in% im_value$PERSON_ID, c("PERSON_ID", "EXERCI_FREQ_RSPS_CD")], 
+                   im_value[,c("PERSON_ID", "EXERCI_FREQ_RSPS_CD")], by = 'PERSON_ID', all.x=TRUE )
+
+data.dependent[data.dependent$PERSON_ID %in% im_value2$PERSON_ID, "EXERCI_FREQ_RSPS_CD"] <- im_value2$EXERCI_FREQ_RSPS_CD.y
+
+# 최종 NA 수
+colSums(is.na(data.dependent))
+
+# 남은 결측 날리기
+data.dep2 <- data.dependent %>% filter(!is.na(SMK_STAT_TYPE_RSPS_CD) & !is.na(DRNK_HABIT_RSPS_CD))
+
+nrow(data.dep2) # 최종 dataset 6,632
+```
+### 전처리
+```{r, warning=F, message=F, echo=F }
+str(data.dep2)
+
+data.dep2$BMI <- as.numeric(data.dep2$BMI)
+data.dep2$BMI <- ifelse(data.dep2$BMI >= 25, 1, 0)
+
+data.dep2$AGE <- ifelse(data.dep2$AGE >= 65, 1, 0)
+
+data.dep2$TOT_CHOLE <- ifelse(as.numeric(data.dep2$TOT_CHOLE)>=220, 1, 0)
+
+data.dep2$DRNK_HABIT_RSPS_CD <- ifelse(data.dep2$DRNK_HABIT_RSPS_CD>=3, 3, data.dep2$DRNK_HABIT_RSPS_CD)
+
+data.dep2$EXERCI_FREQ_RSPS_CD <- ifelse(data.dep2$EXERCI_FREQ_RSPS_CD>=2, 2, 1)
+
+data.dep2$CCI_orig <- ifelse(data.dep2$CCI_orig>=3, 3, data.dep2$CCI_orig)
+
+data.dep2$CTRB_PT_TYPE_CD <- ifelse(data.dep2$CTRB_PT_TYPE_CD<=1, 0, 2)
+data.dep2$CTRB_PT_TYPE_CD <- ifelse(data.dep2$CTRB_PT_TYPE_CD==2, 1, 0)
+
+colnames(data.dep2) <- c("PERSON_ID", "BMI", "Cholestrol", "Smoke_Status", "Drink_Status", "Exercise", "CVD_DT", "Aspirin_DT", 
+                         "CVD", "Aspirin", "INDEX_DT", "FUDT", "SEX", "AGE", "Income", "CCI_Score", "HTN", "DM", "DL", "START", "STOP", "Aspirin1", "CVD1")
+```
+
+### 기초통계량
+```{r, warning=F, message=F, echo=F}
+# 5632 (결측 4개 날린 후) 기초통계량
+data.dep2$SEX <- factor(data.dep2$SEX, levels=c(1,2), labels=c("Male", "Female"))
+data.dep2$AGE <- factor(data.dep2$AGE, levels=c(0,1), labels=c("<65", ">=65"))
+
+data.dep2$BMI <- factor(data.dep2$BMI, levels=c(0,1), labels=c("<25", ">=25"))
+data.dep2$Cholestrol <- factor(data.dep2$Cholestrol, levels=c(0,1), labels=c("<220",">=220"))
+data.dep2$Smoke_Status <- factor(data.dep2$Smoke_Status, 
+                                          levels=c(1,2,3), labels=c("Never Smoked", "Smoked in the past", "Currently a smoker"), ordered = is.ordered(data.dep2$Smoke_Status))
+data.dep2$Drink_Status <- factor(data.dep2$Drink_Status, levels=c(1,2,3), labels=c("Hardly drank", "2-3 a month", "More than once a week"), ordered = is.ordered(data.dep2$Drink_Status))
+data.dep2$Exercise <- factor(data.dep2$Exercise, levels=c(1,2), labels=c("No", "Yes"))
+
+data.dep2$CCI <- factor(data.dep2$CCI_Score, levels=c(0,1,2,3), labels=c("0", "1", "2", ">=3"))
+data.dep2$Income <- factor(data.dep2$Income, levels=c(0,1), labels=c("0-1", "2-10"))
+
+data.dep3 <- data.dep2 %>% 
+  select("PERSON_ID", "AGE", "SEX", "Income", "HTN", "DM", "DL", "BMI", "Cholestrol", "Smoke_Status", "Drink_Status", "Exercise", "Aspirin",   "CCI")
+
+data.dep3 <- unique(data.dep3)
+myT2 <- mytable(Aspirin ~., data=data.dep3[,2:14])
+
+print(myT2)
+```
+
+## 1. Time Fixed Survival Analysis
+
+```{r, warning=F, message=F }
+# (1) Naive Model
+fixed.fit <- survfit(Surv(TIME, CVD)~Aspirin, data=data.fixed)
+ggsurvplot(fixed.fit, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+fixed.cox <- coxph(Surv(TIME, CVD)~Aspirin, data=data.fixed)
+summary(fixed.cox)  
+ggforest(fixed.cox,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+```
+
+```{r, warning=F, message=F, echo=F}
+#fixed.zph <- cox.zph(fixed.cox, transform="km")
+
+#ggcoxzph(fixed.zph)
+```
+
+## 2. Time Dependent Survival Analysis
+
+### 2.1 
+```{r, warning=F, message=F }
+dependent.fit <- survfit(Surv(START, STOP, CVD1)~Aspirin1, data=data.dep2)
+ggsurvplot(dependent.fit, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+dependent.cox <- coxph(Surv(START, STOP, CVD1)~Aspirin1, data=data.dep2)
+
+summary(dependent.cox)
+ggforest(dependent.cox,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+```
+
+### 2.2 Multi 
+```{r, warning=F, message=F }
+#dependent.fit2 <- survfit(Surv(START, STOP, CVD1)~Aspirin1+AGE+SEX, data=data.dep2)
+dependent.cox2 <- coxph(Surv(START, STOP, CVD1)~Aspirin1+AGE+SEX+Income, data=data.dep2)
+
+summary(dependent.cox2)
+
+#ggsurvplot(dependent.fit2, 
+#           risk.table = TRUE,  combine = TRUE,
+#           fun = "cumhaz", palette="nejm",
+#           submain="CVD Event with/without Aspirin") +
+#  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+#                  font.x = c(14, "bold.italic", "black"),
+#                  font.y = c(14, "bold.italic", "black"))
+
+ggforest(dependent.cox2,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+#dependent.fit2_2 <- survfit(Surv(START, STOP, CVD1)~Aspirin1+AGE+SEX+BMI+Cholestrol+Smoke_Status+Drink_Status+Exercise+Income, data=data.dep2)
+dependent.cox2_2 <- coxph(Surv(START, STOP, CVD1)~Aspirin1+AGE+SEX+BMI+Cholestrol+Smoke_Status+Drink_Status+Exercise+Income, data=data.dep2)
+
+summary(dependent.cox2_2)
+ggforest(dependent.cox2_2,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+```
+
+### 2.3 CCI 보정
+```{r, warning=F, message=F }
+dependent.cox3 <- coxph(Surv(START, STOP, CVD1)~Aspirin1+CCI_Score, data=data.dep2)
+summary(dependent.cox3)
+ggforest(dependent.cox3,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+```
+
+
+### 2.4 CCI + 건강검진 변수 보정
+```{r, warning=F, message=F }
+dependent.cox4 <- coxph(Surv(START, STOP, CVD1)~Aspirin1+CCI_Score+AGE+SEX+Income, data=data.dep2)
+summary(dependent.cox4)
+ggforest(dependent.cox4,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+dependent.cox4_2 <- coxph(Surv(START, STOP, CVD1)~Aspirin1+CCI_Score+Aspirin1+AGE+SEX+BMI+Cholestrol+Smoke_Status+Drink_Status+Exercise+Income, data=data.dep2)
+summary(dependent.cox4_2)
+ggforest(dependent.cox4_2,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+#fit <- survfit(dependent.cox4_2, newdata = data.dep2)
+#ggsurvplot(fit, conf.int = TRUE, data=data.dep2)
+
+```
+
+## 3. Subgrou Analysis (HTN, DM, DL)
+### 3.0 HTN, DM, DL 이 선행논문처럼 event를 높이는지..? (Only Check)
+```{r, warning=F, message=F}
+coxph(Surv(START, STOP, HTN)~Aspirin1, data=data.dep2)
+coxph(Surv(START, STOP, DM)~Aspirin1, data=data.dep2)
+coxph(Surv(START, STOP, DL)~Aspirin1, data=data.dep2)
+```
+
+### 3.1 Hypertension
+```{r, warning=F, message=F}
+HTN0 <- data.dep2[data.dep2$HTN==0,]
+HTN1 <- data.dep2[data.dep2$HTN==1,]
+
+HTN.fit0 <- survfit(Surv(START, STOP, CVD1)~Aspirin1, data=HTN0)
+ggsurvplot(HTN.fit0, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+HTN.cox0 <- coxph(Surv(START, STOP, CVD1)~Aspirin1, data=HTN0)
+
+summary(HTN.cox0)
+ggforest(HTN.cox0,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+HTN.fit1 <- survfit(Surv(START, STOP, CVD1)~Aspirin1, data=HTN1)
+ggsurvplot(HTN.fit1, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+HTN.cox1 <- coxph(Surv(START, STOP, CVD1)~Aspirin1, data=HTN1)
+
+summary(HTN.cox1)
+ggforest(HTN.cox1,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+```
+
+### 3.2 Diabetes Mellitus
+```{r, warning=F, message=F}
+DM0 <- data.dep2[data.dep2$DM==0,]
+DM1 <- data.dep2[data.dep2$DM==1,]
+
+DM.fit0 <- survfit(Surv(START, STOP, CVD1)~Aspirin1, data=DM0)
+ggsurvplot(DM.fit0, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+DM.cox0 <- coxph(Surv(START, STOP, CVD1)~Aspirin1, data=DM0)
+
+summary(DM.cox0)
+ggforest(DM.cox0,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+DM.fit1 <- survfit(Surv(START, STOP, CVD1)~Aspirin1, data=DM1)
+ggsurvplot(DM.fit1, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+DM.cox1 <- coxph(Surv(START, STOP, CVD1)~Aspirin1, data=DM1)
+
+summary(DM.cox1)
+ggforest(DM.cox1,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+```
+
+### 3.3 Dyslipidemia
+```{r, warning=F, message=F}
+DL0 <- data.dep2[data.dep2$DL==0,]
+DL1 <- data.dep2[data.dep2$DL==1,]
+
+DL.fit0 <- survfit(Surv(START, STOP, CVD1)~Aspirin1, data=DL0)
+ggsurvplot(DL.fit0, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+DL.cox0 <- coxph(Surv(START, STOP, CVD1)~Aspirin1, data=DL0)
+
+summary(DL.cox0)
+ggforest(DL.cox0,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+DL.fit1 <- survfit(Surv(START, STOP, CVD1)~Aspirin1, data=DL1)
+ggsurvplot(DL.fit1, 
+           risk.table = TRUE, risk.table.col = "strata",
+           fun = "cumhaz", palette="nejm",
+           legend.labs = c("No Aspirin User", "Aspirin User"), submain="CVD Event with/without Aspirin") +
+  theme_survminer(font.submain=c(15, "bold.italic", "black"),
+                  font.x = c(14, "bold.italic", "black"),
+                  font.y = c(14, "bold.italic", "black"))
+
+DL.cox1 <- coxph(Surv(START, STOP, CVD1)~Aspirin1, data=DL1)
+
+summary(DL.cox1)
+ggforest(DL.cox1,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+```
+
+### 4.4 + HTN, DL, DM
+```{r, warning=F, message=F}
+
+dependent.cox5 <- coxph(Surv(START, STOP, CVD1)~Aspirin1+CCI_Score+HTN+DM+DL+Aspirin1+AGE+SEX+BMI+Cholestrol+Smoke_Status+Drink_Status+Exercise+Income, data=data.dep2)
+summary(dependent.cox5)
+ggforest(dependent.cox5,
+         main = "CVD Event Hazard Ratio", 
+         fontsize = 0.7, 
+         refLabel = "reference", 
+         noDigits = 2, 
+         data=data.dep2)
+
+```
+
+## 4. 전체 HR
+```{r, warning=F, message=F, echo=F}
+label1 <- c("Time-fixed Cox", rep("Time-Varying Cox",7))
+label2 <- c("X", "X", "AGE, SEX, Income", "AGE, SEX, Income, GJ", "CCI", "CCI, AGE, SEX, Income",
+            "CCI, AGE, SEX, Income, GJ", "All (+HTN, DM, DL)")
+label3 <- paste0(label1, " (", label2, " )")
+
+HR <- c(summary(fixed.cox)$coef[2],
+        summary(dependent.cox)$coef[2],
+        summary(dependent.cox2)$coef[1,2],
+        summary(dependent.cox2_2)$coef[1,2],
+        summary(dependent.cox3)$coef[1,2],
+        summary(dependent.cox4)$coef[1,2],
+        summary(dependent.cox4_2)$coef[1,2],
+        summary(dependent.cox5)$coef[1,2])
+
+lower <- c(summary(fixed.cox)$conf.int[1,3],
+           summary(dependent.cox)$conf.int[1,3],
+           summary(dependent.cox2)$conf.int[1,3],
+           summary(dependent.cox2_2)$conf.int[1,3],
+           summary(dependent.cox3)$conf.int[1,3],
+           summary(dependent.cox4)$conf.int[1,3],
+           summary(dependent.cox4_2)$conf.int[1,3],
+           summary(dependent.cox5)$conf.int[1,3])
+
+upper <- c(summary(fixed.cox)$conf.int[1,4],
+           summary(dependent.cox)$conf.int[1,4],
+           summary(dependent.cox2)$conf.int[1,4],
+           summary(dependent.cox2_2)$conf.int[1,4],
+           summary(dependent.cox4)$conf.int[1,4],
+           summary(dependent.cox4)$conf.int[1,4],
+           summary(dependent.cox4_2)$conf.int[1,4],
+           summary(dependent.cox5)$conf.int[1,4])
+
+df <- data.frame(label1, label2, label3, HR, lower, upper)
+
+df$label3 <- factor(df$label3, levels=rev(df$label3))
+df$info <- paste0(round(HR,3), " (", round(df$lower,3), ", ", round(df$upper,3), ")")
+
+coefp <- ggplot(df, aes(colour = label3))
+coefp <- coefp + geom_hline(yintercept = 1, colour = gray(1/2), lty = 2)
+coefp <- coefp + geom_linerange(aes(x = label3, ymin = lower, ymax = upper),
+                            lwd = 1, position = position_dodge(width = 1/2), color="darkred")
+coefp <- coefp + geom_pointrange(aes(x = label3, y = HR, ymin = lower, ymax = upper),
+                             lwd = 1/2, position = position_dodge(width = 1/2),
+                             shape = 21, size=5, fill = "WHITE", color="darkred")
+coefp <- coefp + coord_flip() + theme_bw() + 
+  theme(panel.grid.major.x = element_blank(), 
+        panel.grid.minor.x = element_blank(), 
+        panel.grid.major.y = element_line(color = "grey60", linetype = "dashed"),
+        legend.title = element_blank(),
+        legend.position = 'none') + xlab("Models") + ylab("Hazard Ratio")
+coefp <- coefp + ggtitle("Comparing several models's HR")
+print(coefp)
+
+knitr::kable(df[,c("label1", "label2", "info")])
+```
