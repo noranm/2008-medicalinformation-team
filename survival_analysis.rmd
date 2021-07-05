@@ -3,7 +3,7 @@ title: "Survival Analysis And Visualization"
 author: "노혜림"
 date: '2020 9 5 '
 output: 
-  html_document:
+  github_document :
     highlight: textmate
     theme: cosmo
     toc: yes
